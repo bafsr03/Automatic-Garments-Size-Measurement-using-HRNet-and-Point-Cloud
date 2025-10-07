@@ -96,7 +96,7 @@ def main():
     # *** Load-model-state
     if cfg.TEST.MODEL_FILE: # 'models/pose_hr....pth' 
         logger.info('=> loading model from {}'.format(cfg.TEST.MODEL_FILE)) # "=> loading model from models/pose_"
-        model.load_state_dict(torch.load(cfg.TEST.MODEL_FILE), strict=True)  # False
+        model.load_state_dict(torch.load(cfg.TEST.MODEL_FILE, map_location=torch.device('cpu')), strict=True)  # False
     else: # if None : -> get state from final check-point
         model_state_file = os.path.join(
             final_output_dir, 'final_state.pth'
@@ -105,14 +105,15 @@ def main():
         model.load_state_dict(torch.load(model_state_file))
 
     # model = torch.nn.DataParallel(model, device_ids=cfg.GPUS).cuda()
-    model = torch.nn.DataParallel(model).cuda()
+    # For CPU-only inference, don't use DataParallel
+    # model = torch.nn.DataParallel(model)  # Use CPU for inference
 
     # define loss function (criterion) and optimizer
     criterion = JointsMSELoss(
         cfg=cfg,
         target_type=cfg.MODEL.TARGET_TYPE,
         use_target_weight=cfg.LOSS.USE_TARGET_WEIGHT
-    ).cuda()
+    )  # CPU inference
 
     # Data loading code
     normalize = transforms.Normalize(
@@ -126,6 +127,9 @@ def main():
             normalize,
         ])
     )
+
+    # Set batch size for CPU inference (single device)
+    batch_size = cfg.TEST.BATCH_SIZE_PER_GPU
 
 # loading annotations into memory...
 # Done (t=6.11s)
@@ -148,7 +152,7 @@ def main():
 
     valid_loader = torch.utils.data.DataLoader(
         valid_dataset,
-        # batch_size=cfg.TEST.BATCH_SIZE_PER_GPU*len(cfg.GPUS),
+        # batch_size=cfg.TEST.BATCH_SIZE_PER_GPU,  # CPU inference
         batch_size=batch_size,
         shuffle=False,
         # num_workers=cfg.WORKERS,

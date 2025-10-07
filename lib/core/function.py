@@ -40,8 +40,8 @@ def train(config, train_loader, train_dataset, model, criterion, optimizer, epoc
         # measure data loading time
         data_time.update(time.time() - end)
 
-        target = target.cuda(non_blocking=True).float()
-        target_weight = target_weight.cuda(non_blocking=True).float()
+        target = target.float()  # CPU inference
+        target_weight = target_weight.float()  # CPU inference
 
         cat_ids = meta['category_id']
         c = meta['center'].numpy()
@@ -151,8 +151,8 @@ def validate(config, val_loader, val_dataset, model, criterion, output_dir,
             # target.shape >>> torch.Size([2, 294, 96, 72])
             # target_weight.shape >>> torch.Size([2, 294, 1])
 
-            target = target.cuda(non_blocking=True).float()
-            target_weight = target_weight.cuda(non_blocking=True).float()
+            target = target.float()  # CPU inference
+            target_weight = target_weight.float()  # CPU inference
 
             cat_ids = meta['category_id'] # tensor([8, 1])
             c = meta['center'].numpy()
@@ -181,7 +181,7 @@ def validate(config, val_loader, val_dataset, model, criterion, output_dir,
                     # this part is ugly, because pytorch has not supported negative index
                     # input_flipped = model(input[:, :, :, ::-1]) # Flipping in dim_lv=4 
                     input_flipped = np.flip(input.cpu().numpy(), 3).copy()
-                    input_flipped = torch.from_numpy(input_flipped).cuda()
+                    input_flipped = torch.from_numpy(input_flipped)  # CPU inference
                     outputs_flipped = model(input_flipped)
 
                     if isinstance(outputs_flipped, list):
@@ -195,7 +195,7 @@ def validate(config, val_loader, val_dataset, model, criterion, output_dir,
                         output_flipped[j, :, :, :] = flip_back(output_flipped[j, None],
                                                 val_dataset.flip_pairs[category_id-1],
                                                 config.MODEL.HEATMAP_SIZE[0])
-                    output_flipped = torch.from_numpy(output_flipped.copy()).cuda()
+                    output_flipped = torch.from_numpy(output_flipped.copy())  # CPU inference
 
                     # feature is not aligned, shift flipped heatmap for higher accuracy
                     if config.TEST.SHIFT_HEATMAP:
