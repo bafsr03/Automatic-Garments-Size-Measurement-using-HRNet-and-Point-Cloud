@@ -5,7 +5,34 @@ from typing import Dict, List, Tuple, Optional, Any
 
 import cv2
 import numpy as np
-from pycocotools.coco import COCO
+# Optional dependency: pycocotools. Provide a simple fallback reader on Windows.
+try:
+    from pycocotools.coco import COCO as _PY_COCO  # type: ignore
+    def _load_coco(ann_path: str):
+        return _PY_COCO(ann_path)
+except Exception:
+    # Minimal COCO-like helper used by this script only
+    class _SimpleCOCO:
+        def __init__(self, ann_path: str):
+            with open(ann_path, 'r') as f:
+                data = json.load(f)
+            self._images = {int(img['id']): img for img in data.get('images', [])}
+            self._categories = {int(cat['id']): cat for cat in data.get('categories', [])}
+
+        def getCatIds(self) -> List[int]:
+            return list(self._categories.keys())
+
+        def loadCats(self, cat_ids: List[int]) -> List[Dict[str, Any]]:
+            return [self._categories[cid] for cid in cat_ids if cid in self._categories]
+
+        def getImgIds(self) -> List[int]:
+            return list(self._images.keys())
+
+        def loadImgs(self, img_ids: List[int]) -> List[Dict[str, Any]]:
+            return [self._images[iid] for iid in img_ids if iid in self._images]
+
+    def _load_coco(ann_path: str):
+        return _SimpleCOCO(ann_path)
 
 
 # DeepFashion2 category id to (start, end) index of keypoints inside the 294-length array (1-based ranges in paper -> here 0-based half-open)
@@ -25,12 +52,124 @@ DF2_CATEGORY_KP_RANGES: Dict[int, Tuple[int, int]] = {
     13: (275, 294),
 }
 
-# Category groups for measurement presets
-TOPS = {1, 2, 3, 4, 5, 6}
-BOTTOMS_SHORTS = {7}
-BOTTOMS_TROUSERS = {8}
-SKIRTS = {9}
-DRESSES = {10, 11, 12, 13}
+# Category groups for measurement presets (per user request)
+# Supported categories only; others will be skipped
+GROUP_1_SHORT_SLEEVE_TOP_OUTWEAR = {1, 3}
+GROUP_2_LONG_SLEEVE_TOP_OUTWEAR = {2, 4}
+GROUP_3_VEST = {5}
+GROUP_4_SHORTS = {7}
+GROUP_5_TROUSERS = {8}
+GROUP_9_SKIRT = {9}
+GROUP_10_SHORT_SLEEVE_DRESS = {10}
+GROUP_11_LONG_SLEEVE_DRESS = {11}
+
+SUPPORTED_CATEGORIES = (
+    GROUP_1_SHORT_SLEEVE_TOP_OUTWEAR
+    | GROUP_2_LONG_SLEEVE_TOP_OUTWEAR
+    | GROUP_3_VEST
+    | GROUP_4_SHORTS
+    | GROUP_5_TROUSERS
+    | GROUP_9_SKIRT
+    | GROUP_10_SHORT_SLEEVE_DRESS
+    | GROUP_11_LONG_SLEEVE_DRESS
+)
+
+def _category_group(category_id: int) -> Optional[str]:
+    if category_id in GROUP_1_SHORT_SLEEVE_TOP_OUTWEAR:
+        return 'G1_SHORT_TOP_OUTWEAR'
+    if category_id in GROUP_2_LONG_SLEEVE_TOP_OUTWEAR:
+        return 'G2_LONG_TOP_OUTWEAR'
+    if category_id in GROUP_3_VEST:
+        return 'G3_VEST'
+    if category_id in GROUP_4_SHORTS:
+        return 'G4_SHORTS'
+    if category_id in GROUP_5_TROUSERS:
+        return 'G5_TROUSERS'
+    if category_id in GROUP_9_SKIRT:
+        return 'G9_SKIRT'
+    if category_id in GROUP_10_SHORT_SLEEVE_DRESS:
+        return 'G10_SHORT_DRESS'
+    if category_id in GROUP_11_LONG_SLEEVE_DRESS:
+        return 'G11_LONG_DRESS'
+    return None
+
+# Edit the following mapping to change which keypoint segments are measured
+# per group. Indices are 1-based within the category's own keypoint set.
+# type: 'length' uses Euclidean distance; 'width' draws a horizontal line.
+KP_SEGMENTS_BY_GROUP = {
+    'G1_SHORT_TOP_OUTWEAR': [
+        {'name': 'neck', 'type': 'length', 'a': 2, 'b': 6},
+        {'name': 'shoulder_to_shoulder', 'type': 'width', 'a': 7, 'b': 25},
+        {'name': 'chest', 'type': 'width', 'a': 12, 'b': 20},
+        {'name': 'waist', 'type': 'width', 'a': 14, 'b': 18},
+        {'name': 'hem', 'type': 'width', 'a': 15, 'b': 17},
+        {'name': 'sleeve_length', 'type': 'length', 'a': 25, 'b': 23},
+        {'name': 'sleeve', 'type': 'length', 'a': 23, 'b': 22},
+    ],
+    'G2_LONG_TOP_OUTWEAR': [
+        {'name': 'neck', 'type': 'length', 'a': 2, 'b': 6},
+        {'name': 'shoulder_to_shoulder', 'type': 'width', 'a': 7, 'b': 33},
+        {'name': 'chest', 'type': 'width', 'a': 17, 'b': 23},
+        {'name': 'waist', 'type': 'width', 'a': 18, 'b': 22},
+        {'name': 'hem', 'type': 'width', 'a': 19, 'b': 21},
+        {'name': 'sleeve_length', 'type': 'length', 'a': 7, 'b': 11},
+        {'name': 'sleeve', 'type': 'length', 'a': 11, 'b': 12},
+    ],
+    'G3_VEST': [
+        {'name': 'neck', 'type': 'length', 'a': 2, 'b': 6},
+        {'name': 'shoulder_to_shoulder', 'type': 'width', 'a': 7, 'b': 25},
+        {'name': 'chest', 'type': 'width', 'a': 12, 'b': 20},
+        {'name': 'waist', 'type': 'width', 'a': 14, 'b': 18},
+        {'name': 'hem', 'type': 'width', 'a': 15, 'b': 17},
+    ],
+    'G10_SHORT_DRESS': [
+        {'name': 'neck', 'type': 'length', 'a': 2, 'b': 6},
+        {'name': 'shoulder_to_shoulder', 'type': 'width', 'a': 7, 'b': 25},
+        {'name': 'chest', 'type': 'width', 'a': 12, 'b': 20},
+        {'name': 'waist', 'type': 'width', 'a': 14, 'b': 18},
+        {'name': 'hem', 'type': 'width', 'a': 15, 'b': 17},
+        {'name': 'sleeve_length', 'type': 'length', 'a': 25, 'b': 23},
+        {'name': 'sleeve', 'type': 'length', 'a': 23, 'b': 22},
+    ],
+    'G11_LONG_DRESS': [
+        {'name': 'neck', 'type': 'length', 'a': 2, 'b': 6},
+        {'name': 'shoulder_to_shoulder', 'type': 'width', 'a': 7, 'b': 25},
+        {'name': 'chest', 'type': 'width', 'a': 12, 'b': 20},
+        {'name': 'waist', 'type': 'width', 'a': 14, 'b': 18},
+        {'name': 'hem', 'type': 'width', 'a': 15, 'b': 17},
+        {'name': 'sleeve_length', 'type': 'length', 'a': 25, 'b': 23},
+        {'name': 'sleeve', 'type': 'length', 'a': 23, 'b': 22},
+    ],
+    # Bottoms: define custom KP segments here if you want exact KP-based measures.
+    # Leave lists empty to fallback to band-based widths.
+    'G4_SHORTS': [
+         {'name': 'waist', 'type': 'width', 'a': 1, 'b': 3},
+         {'name': 'front_rise', 'type': 'length', 'a': 2, 'b': 7},
+         {'name': 'back_rise', 'type': 'length', 'a': 4, 'b': 10},
+         {'name': 'inseam', 'type': 'length', 'a': 4, 'b': 7},
+         {'name': 'length', 'type': 'length', 'a': 1, 'b': 5},   
+         {'name': 'half_knee', 'type': 'length', 'a': 7, 'b': 6},
+         {'name': 'leg_opening', 'type': 'length', 'a': 5, 'b': 6},        
+    ],
+
+    'G5_TROUSERS': [
+         {'name': 'waist', 'type': 'length', 'a': 3, 'b': 1},
+         {'name': 'front_rise', 'type': 'width', 'a': 2, 'b': 9},
+         {'name': 'hip', 'type': 'width', 'a': 15, 'b': 17},
+         {'name': 'thigh', 'type': 'length', 'a': 9, 'b': 4},   
+         {'name': 'length', 'type': 'length', 'a': 6, 'b': 1},   
+         {'name': 'knee', 'type': 'length', 'a': 8, 'b': 5},
+         {'name': 'inseam', 'type': 'length', 'a': 9, 'b': 7},
+         {'name': 'leg_opening', 'type': 'length', 'a': 7, 'b': 6},
+    ],
+    'G9_SKIRT': [
+         {'name': 'waist', 'type': 'width', 'a': 1, 'b': 3},
+         {'name': 'hip', 'type': 'width', 'a': 4, 'b': 8},
+         {'name': 'length', 'type': 'length', 'a': 2, 'b': 6},
+         {'name': 'hem', 'type': 'length', 'a': 7, 'b': 5},   
+        
+    ],
+}
 
 ###############################
 # Band-based measurement model
@@ -176,14 +315,13 @@ def compute_measurements_for_item(kpts_flat: List[float], category_id: int, unit
 
     # Generic vertical length (top-to-bottom span of visible keypoints)
     length_val = _calculate_length_from_points(kpts_cat, score_thr)
-    if category_id in TOPS or category_id in DRESSES:
-        # For tops/dresses, prefer explicit front length over generic body span.
-        # We still compute length_val above but do not expose 'body_length'.
-        pass
+    # Determine supported measurement group for this category
+    group_key = _category_group(category_id)
+    # For tops/dresses groups, we prefer explicit front length over generic span.
 
     # Band fractions per garment group (top=0.0, bottom=1.0)
     # These were chosen to capture typical anatomical widths.
-    if category_id in TOPS or category_id in DRESSES:
+    if group_key in ('G1_SHORT_TOP_OUTWEAR', 'G2_LONG_TOP_OUTWEAR', 'G3_VEST', 'G10_SHORT_DRESS', 'G11_LONG_DRESS'):
         # Top-specific direct keypoint pairs (1-based indices within category)
         # Mapping provided by user
         def get_pt(idx1b: int) -> Optional[Tuple[float, float]]:
@@ -214,51 +352,93 @@ def compute_measurements_for_item(kpts_flat: List[float], category_id: int, unit
             val, _ = _convert_units(dist_px, unit, px_per_cm)
             measurements[name] = float(val)
             measurements[f'{name}_line'] = {'left': [float(pa[0]), float(pa[1])], 'right': [float(pb[0]), float(pb[1])]} 
+        # Populate from centralized per-group mapping
+        for seg in KP_SEGMENTS_BY_GROUP.get(group_key, []):
+            name = seg['name']
+            a = int(seg['a'])
+            b = int(seg['b'])
+            if seg['type'] == 'length':
+                add_length_from_pair(name, a, b)
+            else:
+                add_width_from_pair(name, a, b)
 
-        # Neck (as per request): (2,6)
-        add_length_from_pair('neck', 2, 6)
-        # Sleeve length: (25,23)
-        add_length_from_pair('sleeve_length', 25, 23)
-        # Shoulder to Shoulder: (7,25) as width
-        add_width_from_pair('shoulder_to_shoulder', 7, 25)
-        # Chest width: (12,20)
-        add_width_from_pair('chest', 12, 20)
-        # Waist width: direct KP pair (14,18)
-        add_width_from_pair('waist', 14, 18)
-        # Hem width: (15,17)
-        add_width_from_pair('hem', 15, 17)
-        # Sleeve segment between keypoints (requested): (23,22)
-        add_length_from_pair('sleeve', 23, 22)
-
-        # Front length: HPS (1) to hemline midpoint between (15,17)
+        # Front length: group-specific
+        # - For long sleeve top/outwear (G2), use keypoint 1 -> 20
+        # - Otherwise, HPS (1) to hemline midpoint between (15,17)
         p1 = get_pt(1)
-        p15 = get_pt(15)
-        p17 = get_pt(17)
-        if p1 is not None and p15 is not None and p17 is not None:
-            mid = ((p15[0]+p17[0])/2.0, (p15[1]+p17[1])/2.0)
-            dist_px = math.hypot(mid[0]-p1[0], mid[1]-p1[1])
-            val, _ = _convert_units(dist_px, unit, px_per_cm)
-            measurements['front_length'] = float(val)
-            measurements['front_length_line'] = {'left': [float(p1[0]), float(p1[1])], 'right': [float(mid[0]), float(mid[1])]} 
+        if group_key == 'G2_LONG_TOP_OUTWEAR':
+            p20 = get_pt(20)
+            if p1 is not None and p20 is not None:
+                dist_px = math.hypot(p20[0]-p1[0], p20[1]-p1[1])
+                val, _ = _convert_units(dist_px, unit, px_per_cm)
+                measurements['front_length'] = float(val)
+                measurements['front_length_line'] = {'left': [float(p1[0]), float(p1[1])], 'right': [float(p20[0]), float(p20[1])]} 
+        else:
+            p15 = get_pt(15)
+            p17 = get_pt(17)
+            if p1 is not None and p15 is not None and p17 is not None:
+                mid = ((p15[0]+p17[0])/2.0, (p15[1]+p17[1])/2.0)
+                dist_px = math.hypot(mid[0]-p1[0], mid[1]-p1[1])
+                val, _ = _convert_units(dist_px, unit, px_per_cm)
+                measurements['front_length'] = float(val)
+                measurements['front_length_line'] = {'left': [float(p1[0]), float(p1[1])], 'right': [float(mid[0]), float(mid[1])]} 
 
-    if category_id in BOTTOMS_TROUSERS or category_id in BOTTOMS_SHORTS or category_id in SKIRTS:
-        band_height = 0.10
-        windows = {
-            'waist_width': (0.02, 0.12, 'max'),
-            'hip_width': (0.20, 0.40, 'max'),
-            'thigh_width': (0.45, 0.65, 'max'),
-            'hem_width': (0.90, 0.99, 'max'),
-        }
-        for name, (f0, f1, obj) in windows.items():
-            bw = _scan_band_width(pts, f0, f1, band_height, objective=obj)
-            if bw is not None:
-                width_px, pL, pR = bw
+    if group_key in ('G4_SHORTS', 'G5_TROUSERS', 'G9_SKIRT'):
+        # If KP segments are specified for this group, use them first
+        segs = KP_SEGMENTS_BY_GROUP.get(group_key, [])
+        used_kp_segments = False
+        if len(segs) > 0:
+            # Reuse helpers from tops section by defining local getters
+            def get_pt(idx1b: int) -> Optional[Tuple[float, float]]:
+                i = idx1b - 1
+                if 0 <= i < kpts_cat.shape[0]:
+                    x, y, s = kpts_cat[i]
+                    if x > -100.0 and y > -100.0:
+                        return float(x), float(y)
+                return None
+            def add_width_from_pair(name: str, a: int, b: int):
+                pa, pb = get_pt(a), get_pt(b)
+                if pa is None or pb is None:
+                    return
+                width_px = abs(pb[0] - pa[0])
                 val, _ = _convert_units(width_px, unit, px_per_cm)
                 measurements[name] = float(val)
-                measurements[f'{name}_line'] = {'left': [float(pL[0]), float(pL[1])], 'right': [float(pR[0]), float(pR[1])]}
-        # Expose vertical length as outseam for bottoms
-        val_len, _ = _convert_units(length_val, unit, px_per_cm)
-        measurements['outseam_length'] = float(val_len)
+                measurements[f'{name}_line'] = {'left': [float(min(pa[0], pb[0])), float((pa[1]+pb[1])/2.0)], 'right': [float(max(pa[0], pb[0])), float((pa[1]+pb[1])/2.0)]}
+            def add_length_from_pair(name: str, a: int, b: int):
+                pa, pb = get_pt(a), get_pt(b)
+                if pa is None or pb is None:
+                    return
+                dist_px = math.hypot(pb[0]-pa[0], pb[1]-pa[1])
+                val, _ = _convert_units(dist_px, unit, px_per_cm)
+                measurements[name] = float(val)
+                measurements[f'{name}_line'] = {'left': [float(pa[0]), float(pa[1])], 'right': [float(pb[0]), float(pb[1])]} 
+            for seg in segs:
+                name = seg['name']
+                a = int(seg['a'])
+                b = int(seg['b'])
+                if seg['type'] == 'length':
+                    add_length_from_pair(name, a, b)
+                else:
+                    add_width_from_pair(name, a, b)
+            used_kp_segments = True
+
+        if not used_kp_segments:
+            # Fallback: band scanning widths
+            band_height = 0.10
+            windows = {
+                'waist_width': (0.02, 0.12, 'max'),
+                'hip_width': (0.20, 0.40, 'max'),
+                'thigh_width': (0.45, 0.65, 'max'),
+                'hem_width': (0.90, 0.99, 'max'),
+            }
+            for name, (f0, f1, obj) in windows.items():
+                bw = _scan_band_width(pts, f0, f1, band_height, objective=obj)
+                if bw is not None:
+                    width_px, pL, pR = bw
+                    val, _ = _convert_units(width_px, unit, px_per_cm)
+                    measurements[name] = float(val)
+                    measurements[f'{name}_line'] = {'left': [float(pL[0]), float(pL[1])], 'right': [float(pR[0]), float(pR[1])]}
+        # Do not expose generic vertical length for bottoms (hide outseam)
 
     measurements['_unit'] = unit_lbl
     return measurements
@@ -299,12 +479,14 @@ def visualize_item(image_path: str,
 
     measurements = compute_measurements_for_item(kpts_flat, category_id, unit, px_per_cm, score_thr=score_thr)
     unit_lbl = measurements.get('_unit', unit)
+    # Determine group for drawing logic
+    group_key = _category_group(category_id)
 
     # Draw measurement lines using keypoints
     colors = {
         # generic
         'body_length': (0, 255, 0),
-        'outseam_length': (0, 255, 0),
+        # 'outseam_length': (0, 255, 0),
         # tops KP-based
         'neck': (255, 140, 0),   # dark orange
         'sleeve_length': (255, 0, 0),        # blue-like
@@ -315,12 +497,17 @@ def visualize_item(image_path: str,
         'sleeve': (128, 0, 128),
         'front_length': (0, 255, 0),
         # bottoms (kept for completeness)
-        'hip_width': (255, 0, 255),
-        'thigh_width': (128, 0, 128),
+        'inseam': (255, 0, 255),
+        'lenght': (255, 0, 165),
+        'half_knee': (255, 0, 0),
+        'leg_opening': (0, 165, 255),
+        'front_rise': (0, 255, 0),
+        'back_rise': (0, 0, 128),
     }
 
-    if category_id in TOPS or category_id in DRESSES:
-        for name in ['neck', 'sleeve_length', 'shoulder_to_shoulder', 'chest', 'waist', 'hem', 'sleeve']:
+    if group_key in ('G1_SHORT_TOP_OUTWEAR', 'G2_LONG_TOP_OUTWEAR', 'G3_VEST', 'G10_SHORT_DRESS', 'G11_LONG_DRESS'):
+        # Draw only the segments defined for this group
+        for name in [seg['name'] for seg in KP_SEGMENTS_BY_GROUP.get(group_key, [])]:
             line = measurements.get(f'{name}_line')
             if line and name in measurements:
                 pL = (line['left'][0], line['left'][1])
@@ -332,7 +519,16 @@ def visualize_item(image_path: str,
             bot = measurements['front_length_line']['right']
             _draw_line_with_label(img, (top[0], top[1]), (bot[0], bot[1]), f"front length: {measurements['front_length']:.1f} {unit_lbl}", colors['body_length'])
 
-    if category_id in BOTTOMS_TROUSERS or category_id in BOTTOMS_SHORTS or category_id in SKIRTS:
+    if group_key in ('G4_SHORTS', 'G5_TROUSERS', 'G9_SKIRT'):
+        # Draw KP-based segments first if any
+        for seg in KP_SEGMENTS_BY_GROUP.get(group_key, []):
+            name = seg['name']
+            line = measurements.get(f'{name}_line')
+            if line and name in measurements:
+                pL = (line['left'][0], line['left'][1])
+                pR = (line['right'][0], line['right'][1])
+                _draw_line_with_label(img, pL, pR, f"{name.replace('_',' ')}: {measurements[name]:.1f} {unit_lbl}", colors.get(name, (255,255,255)))
+        # Also draw band-based widths if they exist
         for name in ['waist_width', 'hip_width', 'thigh_width', 'hem_width']:
             line = measurements.get(f'{name}_line')
             if line and name in measurements:
@@ -340,11 +536,7 @@ def visualize_item(image_path: str,
                 pR = (line['right'][0], line['right'][1])
                 _draw_line_with_label(img, pL, pR, f"{name.replace('_',' ')}: {measurements[name]:.1f} {unit_lbl}", colors.get(name, (255,255,255)))
         # vertical length
-        if 'outseam_length' in measurements and pts.shape[0] > 0:
-            y_min = float(pts[:, 1].min())
-            y_max = float(pts[:, 1].max())
-            x_center = float(pts[:, 0].mean())
-            _draw_line_with_label(img, (x_center, y_min), (x_center, y_max), f"outseam length: {measurements['outseam_length']:.1f} {unit_lbl}", colors['outseam_length'])
+        # Hide outseam length for bottoms
 
     # Save
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -366,7 +558,7 @@ def run_from_results(results_json: str,
     with open(results_json, 'r') as f:
         results = json.load(f)
 
-    coco = COCO(ann_json)
+    coco = _load_coco(ann_json)
     cat_id_to_name = {c['id']: c['name'] for c in coco.loadCats(coco.getCatIds())}
     imgid_to_file = {}
     for img in coco.loadImgs(coco.getImgIds()):

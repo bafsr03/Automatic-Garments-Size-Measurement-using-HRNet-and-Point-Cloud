@@ -62,3 +62,7 @@ DeepFashion2/**/pycocotools/*.c
 DeepFashion2/**/pycocotools/*.pyc
 
 
+# Run artifacts (exclude per-run outputs from version control)
+api_runs/
+
+
