@@ -5,34 +5,7 @@ from typing import Dict, List, Tuple, Optional, Any
 
 import cv2
 import numpy as np
-# Optional dependency: pycocotools. Provide a simple fallback reader on Windows.
-try:
-    from pycocotools.coco import COCO as _PY_COCO  # type: ignore
-    def _load_coco(ann_path: str):
-        return _PY_COCO(ann_path)
-except Exception:
-    # Minimal COCO-like helper used by this script only
-    class _SimpleCOCO:
-        def __init__(self, ann_path: str):
-            with open(ann_path, 'r') as f:
-                data = json.load(f)
-            self._images = {int(img['id']): img for img in data.get('images', [])}
-            self._categories = {int(cat['id']): cat for cat in data.get('categories', [])}
-
-        def getCatIds(self) -> List[int]:
-            return list(self._categories.keys())
-
-        def loadCats(self, cat_ids: List[int]) -> List[Dict[str, Any]]:
-            return [self._categories[cid] for cid in cat_ids if cid in self._categories]
-
-        def getImgIds(self) -> List[int]:
-            return list(self._images.keys())
-
-        def loadImgs(self, img_ids: List[int]) -> List[Dict[str, Any]]:
-            return [self._images[iid] for iid in img_ids if iid in self._images]
-
-    def _load_coco(ann_path: str):
-        return _SimpleCOCO(ann_path)
+from pycocotools.coco import COCO
 
 
 # DeepFashion2 category id to (start, end) index of keypoints inside the 294-length array (1-based ranges in paper -> here 0-based half-open)
@@ -558,7 +531,7 @@ def run_from_results(results_json: str,
     with open(results_json, 'r') as f:
         results = json.load(f)
 
-    coco = _load_coco(ann_json)
+    coco = COCO(ann_json)
     cat_id_to_name = {c['id']: c['name'] for c in coco.loadCats(coco.getCatIds())}
     imgid_to_file = {}
     for img in coco.loadImgs(coco.getImgIds()):

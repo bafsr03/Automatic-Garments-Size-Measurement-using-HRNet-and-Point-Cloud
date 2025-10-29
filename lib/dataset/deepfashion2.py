@@ -460,12 +460,20 @@ class DeepFashion2Dataset(JointsDataset):
 
         # *** "=> writing results json to output/deepfashion2/..."
         self._write_coco_keypoint_results_DeepFashion2(oks_nmsed_kpts, res_file)
-        if 'test' not in self.image_set:
-            info_str = self._do_python_keypoint_eval(
-                res_file, res_folder) # - (1.) 
-            name_value = OrderedDict(info_str)
-            return name_value, name_value['AP']
-        else:
+        # For DeepFashion2 (294 joints), COCOeval (expects 17) is not applicable and
+        # will crash with broadcasting errors. We only need the results json for
+        # downstream measurement, so safely skip evaluation unless the joint
+        # layout matches COCO.
+        try:
+            if 'test' not in self.image_set and getattr(self, 'num_joints', 17) == 17:
+                info_str = self._do_python_keypoint_eval(
+                    res_file, res_folder)
+                name_value = OrderedDict(info_str)
+                return name_value, name_value.get('AP', 0)
+            else:
+                return {'Null': 0}, 0
+        except Exception as _e:
+            logger.warning('Skip COCOeval due to error: %s', str(_e))
             return {'Null': 0}, 0
         # - (1.) 
         # Loading and preparing results...

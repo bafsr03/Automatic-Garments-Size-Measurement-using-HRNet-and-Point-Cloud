@@ -2,7 +2,7 @@ import os
 import json
 import shutil
 import subprocess
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Optional
 
 import cv2
 import sys
@@ -15,46 +15,10 @@ def _ensure_dirs(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
-def run_midas(input_image: str, out_dir: str) -> Tuple[str, str]:
-    _ensure_dirs(out_dir)
-    # Use existing MiDaS run.py in sibling repo if available; fallback to local import
-    midas_repo = os.path.abspath(os.path.join(REPO_ROOT, "..", "MiDaS"))
-    run_py = os.path.join(midas_repo, "run.py")
-    if not os.path.exists(run_py):
-        raise RuntimeError("MiDaS run.py not found; expected at ../MiDaS/run.py")
-
-    # Copy image to MiDaS root and call run.py with env to override input/output
-    tmp_input = os.path.join(midas_repo, "input.jpg")
-    shutil.copyfile(input_image, tmp_input)
-
-    env = os.environ.copy()
-    # Force UTF-8 for MiDaS prints (avoids Windows cp1252 UnicodeEncodeError)
-    env["PYTHONIOENCODING"] = "utf-8"
-    # run.py saves to MiDaS/output; we will copy results back
-    try:
-        completed = subprocess.run([sys.executable, run_py], cwd=midas_repo, env=env, capture_output=True, text=True, check=True)
-    except subprocess.CalledProcessError as e:
-        msg = (
-            "MiDaS run.py failed.\n"
-            f"returncode: {e.returncode}\n"
-            f"stdout:\n{(e.stdout or '')[-4000:]}\n"
-            f"stderr:\n{(e.stderr or '')[-4000:]}\n"
-        )
-        raise RuntimeError(msg)
-
-    depth_png = os.path.join(midas_repo, "output", "depth.png")
-    ply_path = os.path.join(midas_repo, "output", "pointcloud.ply")
-    if not os.path.exists(depth_png) or not os.path.exists(ply_path):
-        raise RuntimeError("MiDaS did not produce expected outputs")
-
-    out_depth = os.path.join(out_dir, "depth.png")
-    out_ply = os.path.join(out_dir, "pointcloud.ply")
-    shutil.copyfile(depth_png, out_depth)
-    shutil.copyfile(ply_path, out_ply)
-    return out_depth, out_ply
+# MiDaS removed per user request
 
 
-def build_single_image_df2_dataset(input_image: str, dataset_root: str) -> str:
+def build_single_image_df2_dataset(input_image: str, dataset_root: str, category_id: int) -> str:
     # Expected structure: root/validation/image/000001.jpg + val-coco_style.json
     img_dir = os.path.join(dataset_root, "validation", "image")
     _ensure_dirs(img_dir)
@@ -78,7 +42,7 @@ def build_single_image_df2_dataset(input_image: str, dataset_root: str) -> str:
             {
                 "id": 1,
                 "image_id": 1,
-                "category_id": 1,
+                "category_id": int(category_id),
                 "bbox": [1, 1, max(2, w - 2), max(2, h - 2)],
                 "area": float(w * h),
                 "iscrowd": 0,
@@ -86,7 +50,7 @@ def build_single_image_df2_dataset(input_image: str, dataset_root: str) -> str:
                 "num_keypoints": 0,
             }
         ],
-        "categories": [{"id": 1, "name": "person"}],
+        "categories": [{"id": int(category_id), "name": "garment"}],
     }
     ann_path = os.path.join(dataset_root, "validation", "val-coco_style.json")
     with open(ann_path, "w") as f:
@@ -117,7 +81,12 @@ def run_hrnet(dataset_root: str, output_dir: str) -> str:
     env["PYTHONPATH"] = REPO_ROOT + os.pathsep + env.get("PYTHONPATH", "")
     env["PYTHONIOENCODING"] = "utf-8"
     # Run without raising immediately; we only need the results JSON
-    proc = subprocess.run(cmd, cwd=REPO_ROOT, env=env, capture_output=True, text=True)
+    # Impose a hard timeout to avoid runaway HRNet inference in production (default 90s)
+    timeout_s = int(os.getenv("HRNET_TIMEOUT_SECONDS", "90"))
+    try:
+        proc = subprocess.run(cmd, cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=timeout_s)
+    except subprocess.TimeoutExpired as te:
+        raise RuntimeError(f"HRNet timed out after {timeout_s}s; partial stdout: {(te.stdout or '')[-2000:]} stderr: {(te.stderr or '')[-2000:]} ")
 
     # Locate results json
     # output/deepfashion2/pose_hrnet/<cfg_name>/<time>/results/keypoints_validation_results_0.json
@@ -143,9 +112,22 @@ def run_hrnet(dataset_root: str, output_dir: str) -> str:
             raise RuntimeError(msg)
         raise RuntimeError("Could not find HRNet keypoints results JSON")
     return results_json
+def _override_results_category(results_json: str, category_id: int) -> str:
+    """Write a copy of results with all category_id fields set to provided value."""
+    try:
+        with open(results_json, 'r') as f:
+            data = json.load(f)
+        for item in data:
+            item['category_id'] = int(category_id)
+        out_path = os.path.splitext(results_json)[0] + f"_cat{int(category_id)}.json"
+        with open(out_path, 'w') as f:
+            json.dump(data, f)
+        return out_path
+    except Exception:
+        return results_json
 
 
-def run_measurement_vis(results_json: str, ann_json: str, images_dir: str, out_dir: str) -> Tuple[str, str]:
+def run_measurement_vis(results_json: str, ann_json: str, images_dir: str, out_dir: str, unit: str, px_per_cm: Optional[float]) -> Tuple[str, str]:
     _ensure_dirs(out_dir)
     vis_dir = os.path.join(out_dir, "measure_vis_keypoints")
     report_json = os.path.join(out_dir, "measure_report_keypoints.json")
@@ -158,12 +140,15 @@ def run_measurement_vis(results_json: str, ann_json: str, images_dir: str, out_d
         "--images-dir", images_dir,
         "--out-vis-dir", vis_dir,
         "--out-report", report_json,
-        "--unit", "px",
+        "--unit", unit,
         "--only-image-id", "1",
     ]
+    if unit != "px" and px_per_cm is not None:
+        cmd.extend(["--px-per-cm", str(px_per_cm)])
     env = os.environ.copy()
     try:
-        completed = subprocess.run(cmd, cwd=REPO_ROOT, env=env, capture_output=True, text=True, check=True)
+        timeout_s = int(os.getenv("MEASURE_TIMEOUT_SECONDS", "60"))
+        completed = subprocess.run(cmd, cwd=REPO_ROOT, env=env, capture_output=True, text=True, check=True, timeout=timeout_s)
     except subprocess.CalledProcessError as e:
         msg = (
             "Measurement script failed.\n"
@@ -172,56 +157,188 @@ def run_measurement_vis(results_json: str, ann_json: str, images_dir: str, out_d
             f"stderr:\n{(e.stderr or '')[-4000:]}\n"
         )
         raise RuntimeError(msg)
+    except subprocess.TimeoutExpired as te:
+        raise RuntimeError(f"Measurement script timed out; partial stdout: {(te.stdout or '')[-2000:]} stderr: {(te.stderr or '')[-2000:]}")
     # Expect one image output with the same name
     vis_image = os.path.join(vis_dir, "000001.jpg")
     return vis_image, report_json
 
 
-def process_image_request(input_image_path: str, work_dir: str) -> Dict[str, Any]:
+def _compute_px_per_cm(results_json: str, category_id: int, true_waist: float) -> Tuple[Optional[float], Optional[float]]:
+    """Compute scale (px/cm) using the provided waist_cm and predicted keypoints.
+    Returns (px_per_cm, waist_px). If cannot compute, returns (None, None).
+    """
+    if true_waist is None or true_waist <= 0:
+        return None, None
+    import importlib
+    import sys as _sys
+    if REPO_ROOT not in _sys.path:
+        _sys.path.insert(0, REPO_ROOT)
+    try:
+        mav = importlib.import_module("tools.measure_and_visualize_keypoints")
+    except Exception:
+        return None, None
+    try:
+        with open(results_json, "r") as f:
+            results = json.load(f)
+        if not results:
+            return None, None
+        # Prefer image_id == 1
+        item = None
+        for it in results:
+            if int(it.get("image_id", -1)) == 1:
+                item = it
+                break
+        if item is None:
+            item = results[0]
+        kpts = item.get("keypoints")
+        if not isinstance(kpts, list):
+            return None, None
+        measurements = mav.compute_measurements_for_item(kpts, int(category_id), unit='px', px_per_cm=None)
+        waist_px = None
+        for key in ("waist", "waist_width"):
+            if key in measurements:
+                waist_px = float(measurements[key])
+                break
+        if waist_px is None or waist_px <= 0:
+            return None, None
+        return (waist_px / float(true_waist)), waist_px
+    except Exception:
+        return None, None
+
+
+def _build_size_scale(measurements: Dict[str, Any], true_size: str, unit: str) -> Dict[str, Dict[str, float]]:
+    size_order = ["XS", "S", "M", "L", "XL", "XXL"]
+    size_upper = (true_size or "L").strip().upper()
+    if size_upper not in size_order:
+        size_upper = "L"
+    base_idx = size_order.index(size_upper)
+
+    # Determine increments per step based on unit; fallback to percentage if px
+    is_px = unit.lower() == 'px'
+    if is_px:
+        width_pct = 0.05
+        length_pct = 0.025
+    else:
+        if unit.lower() in ("cm", "centimeter", "centimeters"):
+            width_inc = 4.0
+            length_inc = 2.0
+        else:  # inches
+            width_inc = 1.6
+            length_inc = 0.8
+
+    def is_width_key(k: str) -> bool:
+        k = k.lower()
+        return any(w in k for w in ["width", "waist", "hip", "chest", "shoulder", "hem", "leg_opening", "thigh", "knee"]) and not k.endswith("_line")
+
+    def is_length_key(k: str) -> bool:
+        k = k.lower()
+        return any(w in k for w in ["length", "inseam", "front_rise", "back_rise"]) and not k.endswith("_line")
+
+    # Build scale table
+    scale: Dict[str, Dict[str, float]] = {s: {} for s in size_order}
+    for key, base_val in measurements.items():
+        if key.startswith("_") or key.endswith("_line"):
+            continue
+        if not isinstance(base_val, (int, float)):
+            continue
+        for i, size in enumerate(size_order):
+            step = i - base_idx
+            if is_px:
+                if is_width_key(key):
+                    val = float(base_val) * (1.0 + width_pct * step)
+                elif is_length_key(key):
+                    val = float(base_val) * (1.0 + length_pct * step)
+                else:
+                    val = float(base_val)
+            else:
+                if is_width_key(key):
+                    val = float(base_val) + width_inc * step
+                elif is_length_key(key):
+                    val = float(base_val) + length_inc * step
+                else:
+                    val = float(base_val)
+            # Prevent negatives
+            scale[size][key] = max(0.0, float(val))
+    return scale
+
+
+def process_image_request(input_image_path: str, work_dir: str, category_id: int, true_size: str, true_waist: Optional[float], unit: str) -> Dict[str, Any]:
     # 1) Copy original
     img_copy = os.path.join(work_dir, "image.jpg")
     if not os.path.exists(img_copy):
         shutil.copyfile(input_image_path, img_copy)
 
-    # 2) MiDaS
-    depth_path, ply_path = run_midas(img_copy, work_dir)
+    # 2) Depth/pointcloud removed
+    depth_path: Optional[str] = None
+    ply_path: Optional[str] = None
 
     # 3) Build DF2 dataset
     dataset_root = os.path.join(work_dir, "df2_dataset")
-    ann_json = build_single_image_df2_dataset(img_copy, dataset_root)
+    ann_json = build_single_image_df2_dataset(img_copy, dataset_root, category_id)
 
     # 4) HRNet inference
     hrnet_out_dir = os.path.join(work_dir, "hrnet_out")
     results_json = run_hrnet(dataset_root, hrnet_out_dir)
+    # Force the provided category_id in results for downstream measurement
+    results_json = _override_results_category(results_json, category_id)
 
-    # 5) Measurement visualization (tolerate failures)
+    # 5) Compute scale and run measurement visualization
     vis_image = None
     report_json = None
     measurement_error = None
     try:
+        px_per_cm, waist_px = _compute_px_per_cm(results_json, category_id, true_waist) if true_waist is not None else (None, None)
+        print(f"[PIPELINE] Running measurement visualization with px_per_cm={px_per_cm}")
         vis_image, report_json = run_measurement_vis(
             results_json,
             ann_json,
             os.path.join(dataset_root, "validation", "image"),
             work_dir,
+            unit=unit,
+            px_per_cm=px_per_cm,
         )
+        print(f"[PIPELINE] Measurement visualization completed: {vis_image}")
     except Exception as e:
+        print(f"[PIPELINE] Measurement visualization failed: {e}")
         measurement_error = str(e)
 
-    result = {
-        "request_dir": work_dir,
-        "rgb": img_copy,
-        "depth": depth_path,
-        "pointcloud": ply_path,
-        "annotations": ann_json,
-        "keypoints_results": results_json,
-    }
+    # Build size scale JSON based on report measurements of this single image
+    size_scale_path = os.path.join(work_dir, "size_scale.json")
+    try:
+        measurements_single: Dict[str, Any] = {}
+        if report_json and os.path.exists(report_json):
+            with open(report_json, 'r') as f:
+                rep = json.load(f)
+            if isinstance(rep, list) and len(rep) > 0:
+                measurements_single = rep[0].get('measurements', {})
+        if measurements_single:
+            scale_table = _build_size_scale(measurements_single, true_size=true_size, unit=unit)
+            with open(size_scale_path, 'w') as f:
+                json.dump({
+                    "unit": unit,
+                    "true_size": true_size,
+                    "scale": scale_table,
+                }, f, indent=2)
+        else:
+            # still write an empty scale file for consistency
+            with open(size_scale_path, 'w') as f:
+                json.dump({"unit": unit, "true_size": true_size, "scale": {}}, f, indent=2)
+    except Exception as e:
+        measurement_error = (str(e) if measurement_error is None else measurement_error)
+
+    # Respond minimally per request: only visualization image and size scale JSON
+    out: Dict[str, Any] = {}
+    # Return relative paths from base directory for file serving
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     if vis_image:
-        result["measurement_vis"] = vis_image
-    if report_json:
-        result["measurement_report"] = report_json
+        rel_vis_path = os.path.relpath(vis_image, base_dir)
+        out["measurement_vis"] = rel_vis_path
+    rel_size_scale_path = os.path.relpath(size_scale_path, base_dir)
+    out["size_scale"] = rel_size_scale_path
+    # Include error if any
     if measurement_error:
-        result["measurement_error"] = measurement_error
-    return result
+        out["error"] = measurement_error
+    return out
 
 

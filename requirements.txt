@@ -1,5 +1,7 @@
 EasyDict==1.7
 opencv-python==4.2.0.32
+# Pin numpy to <1.24 due to deprecated np.float usage in upstream code
+numpy==1.23.5
 # shapely==1.6.4
 Cython
 scipy
@@ -9,3 +11,4 @@ json_tricks
 scikit-image
 yacs>=0.1.5
 tensorboardX==1.6
+pycocotools==2.0.7
