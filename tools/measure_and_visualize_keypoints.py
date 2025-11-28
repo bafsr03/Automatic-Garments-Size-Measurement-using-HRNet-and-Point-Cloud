@@ -420,9 +420,8 @@ def compute_measurements_for_item(kpts_flat: List[float], category_id: int, unit
 def _draw_line_with_label(img: np.ndarray, p1: Tuple[float, float], p2: Tuple[float, float], label: str, color: Tuple[int, int, int]) -> None:
     p1i = (int(round(p1[0])), int(round(p1[1])))
     p2i = (int(round(p2[0])), int(round(p2[1])))
+    # Only draw the line without the label
     cv2.line(img, p1i, p2i, color, 3, cv2.LINE_AA)
-    mid = (int((p1i[0] + p2i[0]) / 2), int((p1i[1] + p2i[1]) / 2))
-    cv2.putText(img, label, mid, cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
 
 
 def visualize_item(image_path: str,
@@ -456,27 +455,8 @@ def visualize_item(image_path: str,
     group_key = _category_group(category_id)
 
     # Draw measurement lines using keypoints
-    colors = {
-        # generic
-        'body_length': (0, 255, 0),
-        # 'outseam_length': (0, 255, 0),
-        # tops KP-based
-        'neck': (255, 140, 0),   # dark orange
-        'sleeve_length': (255, 0, 0),        # blue-like
-        'shoulder_to_shoulder': (0, 165, 255),
-        'chest': (255, 0, 0),
-        'waist': (0, 0, 255),
-        'hem': (0, 255, 255),
-        'sleeve': (128, 0, 128),
-        'front_length': (0, 255, 0),
-        # bottoms (kept for completeness)
-        'inseam': (255, 0, 255),
-        'lenght': (255, 0, 165),
-        'half_knee': (255, 0, 0),
-        'leg_opening': (0, 165, 255),
-        'front_rise': (0, 255, 0),
-        'back_rise': (0, 0, 128),
-    }
+    # Use a single color for all measurement lines for cleaner visualization
+    measurement_color = (255, 255, 0)  # Cyan color for all measurements
 
     if group_key in ('G1_SHORT_TOP_OUTWEAR', 'G2_LONG_TOP_OUTWEAR', 'G3_VEST', 'G10_SHORT_DRESS', 'G11_LONG_DRESS'):
         # Draw only the segments defined for this group
@@ -485,12 +465,12 @@ def visualize_item(image_path: str,
             if line and name in measurements:
                 pL = (line['left'][0], line['left'][1])
                 pR = (line['right'][0], line['right'][1])
-                _draw_line_with_label(img, pL, pR, f"{name.replace('_',' ')}: {measurements[name]:.1f} {unit_lbl}", colors.get(name, (255,255,255)))
+                _draw_line_with_label(img, pL, pR, f"{name.replace('_',' ')}: {measurements[name]:.1f} {unit_lbl}", measurement_color)
         # no generic body length drawing for tops/dresses; use front length only
         if 'front_length_line' in measurements:
             top = measurements['front_length_line']['left']
             bot = measurements['front_length_line']['right']
-            _draw_line_with_label(img, (top[0], top[1]), (bot[0], bot[1]), f"front length: {measurements['front_length']:.1f} {unit_lbl}", colors['body_length'])
+            _draw_line_with_label(img, (top[0], top[1]), (bot[0], bot[1]), f"front length: {measurements['front_length']:.1f} {unit_lbl}", measurement_color)
 
     if group_key in ('G4_SHORTS', 'G5_TROUSERS', 'G9_SKIRT'):
         # Draw KP-based segments first if any
@@ -500,14 +480,14 @@ def visualize_item(image_path: str,
             if line and name in measurements:
                 pL = (line['left'][0], line['left'][1])
                 pR = (line['right'][0], line['right'][1])
-                _draw_line_with_label(img, pL, pR, f"{name.replace('_',' ')}: {measurements[name]:.1f} {unit_lbl}", colors.get(name, (255,255,255)))
+                _draw_line_with_label(img, pL, pR, f"{name.replace('_',' ')}: {measurements[name]:.1f} {unit_lbl}", measurement_color)
         # Also draw band-based widths if they exist
         for name in ['waist_width', 'hip_width', 'thigh_width', 'hem_width']:
             line = measurements.get(f'{name}_line')
             if line and name in measurements:
                 pL = (line['left'][0], line['left'][1])
                 pR = (line['right'][0], line['right'][1])
-                _draw_line_with_label(img, pL, pR, f"{name.replace('_',' ')}: {measurements[name]:.1f} {unit_lbl}", colors.get(name, (255,255,255)))
+                _draw_line_with_label(img, pL, pR, f"{name.replace('_',' ')}: {measurements[name]:.1f} {unit_lbl}", measurement_color)
         # vertical length
         # Hide outseam length for bottoms
 
