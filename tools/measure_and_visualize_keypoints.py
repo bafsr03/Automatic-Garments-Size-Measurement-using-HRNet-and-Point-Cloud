@@ -266,16 +266,31 @@ def _calculate_length_from_points(kpts_cat: np.ndarray, score_thr: float = 0.2) 
     return max(0.0, y_max - y_min)
 
 
+def _round_measurement(value: float, unit: str, decimals: int = 2) -> float:
+    """
+    Round measurement to specified decimal places.
+    - For CM: round to 2 decimals (e.g., 54.12 cm)
+    - For Inches: round to 2 decimals (e.g., 21.31 in)
+    - For PX: round to whole numbers (e.g., 542 px)
+    """
+    if unit.lower() == 'px':
+        return float(round(value, 0))
+    return float(round(value, decimals))
+
+
 def _convert_units(px: float, unit: str, px_per_cm: Optional[float]) -> Tuple[float, str]:
     unit = unit.lower()
     if unit == 'px' or px_per_cm is None:
-        return px, 'px'
+        return _round_measurement(px, 'px'), 'px'
     if unit in ('cm', 'centimeter', 'centimeters'):
-        return px / px_per_cm, 'cm'
+        converted = px / px_per_cm
+        return _round_measurement(converted, 'cm'), 'cm'
     if unit in ('inch', 'inches', 'in'):
-        return px / (px_per_cm * 2.54), 'in'
+        converted = px / (px_per_cm * 2.54)
+        return _round_measurement(converted, 'in'), 'in'
     # default fallback
-    return px, 'px'
+    return _round_measurement(px, 'px'), 'px'
+
 
 
 def compute_measurements_for_item(kpts_flat: List[float], category_id: int, unit: str, px_per_cm: Optional[float], score_thr: float = 0.2) -> Dict[str, Any]:

@@ -207,25 +207,67 @@ def _compute_px_per_cm(results_json: str, category_id: int, true_waist: float) -
         return None, None
 
 
-def _build_size_scale(measurements: Dict[str, Any], true_size: str, unit: str) -> Dict[str, Dict[str, float]]:
+def _build_size_scale(measurements: Dict[str, Any], true_size: str, input_unit: str) -> Tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, float]]]:
     size_order = ["XS", "S", "M", "L", "XL", "XXL"]
     size_upper = (true_size or "L").strip().upper()
     if size_upper not in size_order:
         size_upper = "L"
     base_idx = size_order.index(size_upper)
 
-    # Determine increments per step based on unit; fallback to percentage if px
-    is_px = unit.lower() == 'px'
-    if is_px:
-        width_pct = 0.05
-        length_pct = 0.025
-    else:
-        if unit.lower() in ("cm", "centimeter", "centimeters"):
-            width_inc = 4.0
-            length_inc = 2.0
-        else:  # inches
-            width_inc = 1.6
-            length_inc = 0.8
+    # Prepare base measurements in both units
+    base_cm = {}
+    base_in = {}
+    
+    is_px = input_unit.lower() == 'px'
+    is_inch = input_unit.lower() in ("inch", "inches", "in")
+    
+    # First pass: normalize input to CM and Inch
+    temp_cm = {}
+    temp_in = {}
+    
+    for k, v in measurements.items():
+        if k.startswith("_") or k.endswith("_line"): continue
+        if not isinstance(v, (int, float)): continue
+        
+        val = float(v)
+        if is_px:
+            temp_cm[k] = val
+            temp_in[k] = val
+        elif is_inch:
+            temp_in[k] = val
+            temp_cm[k] = val * 2.54
+        else: # CM
+            temp_cm[k] = val
+            temp_in[k] = val / 2.54
+
+    # Detect Half-Width (Flat) vs Girth (Circumference)
+    # Heuristic: If Chest/Bust < 70cm (or < 28in), it's likely Half-Width.
+    # We MUST store Girth for the recommender to work simply.
+    
+    chest_val = temp_cm.get("chest") or temp_cm.get("bust") or temp_cm.get("chest_width")
+    is_half_width = False
+    if chest_val and chest_val < 70.0:
+        is_half_width = True
+        print(f"[PIPELINE] Detected Half-Width measurements (Chest {chest_val:.1f}cm). Converting to Girth.")
+
+    horizontal_keys = {"chest", "bust", "waist", "hips", "hem", "thigh", "chest_width", "bust_width", "waist_width", "hip_width"}
+    
+    for k in temp_cm:
+        val_cm = temp_cm[k]
+        val_in = temp_in[k]
+        
+        # Normalize key name
+        k_norm = k.lower()
+        if k_norm == "shoulder_to_shoulder": k_norm = "shoulder_width"
+        
+        # Apply doubling if half-width and is a horizontal girth measure
+        # Note: Shoulder width is NOT a girth measure, so we exclude it.
+        if is_half_width and any(hk in k_norm for hk in horizontal_keys) and "shoulder" not in k_norm:
+            val_cm *= 2.0
+            val_in *= 2.0
+            
+        base_cm[k_norm] = val_cm
+        base_in[k_norm] = val_in
 
     def is_width_key(k: str) -> bool:
         k = k.lower()
@@ -235,32 +277,58 @@ def _build_size_scale(measurements: Dict[str, Any], true_size: str, unit: str) -
         k = k.lower()
         return any(w in k for w in ["length", "inseam", "front_rise", "back_rise"]) and not k.endswith("_line")
 
-    # Build scale table
-    scale: Dict[str, Dict[str, float]] = {s: {} for s in size_order}
-    for key, base_val in measurements.items():
-        if key.startswith("_") or key.endswith("_line"):
-            continue
-        if not isinstance(base_val, (int, float)):
-            continue
-        for i, size in enumerate(size_order):
-            step = i - base_idx
+    # Define increments
+    # CM
+    cm_width_inc = 4.0
+    cm_length_inc = 2.0
+    # Inch
+    in_width_inc = 1.6
+    in_length_inc = 0.8
+    # PX (Percentage)
+    px_width_pct = 0.05
+    px_length_pct = 0.025
+
+    scale_cm: Dict[str, Dict[str, float]] = {s: {} for s in size_order}
+    scale_in: Dict[str, Dict[str, float]] = {s: {} for s in size_order}
+
+    # Generate scales
+    for i, size in enumerate(size_order):
+        step = i - base_idx
+        
+        # CM Generation
+        for key, base_val in base_cm.items():
             if is_px:
-                if is_width_key(key):
-                    val = float(base_val) * (1.0 + width_pct * step)
-                elif is_length_key(key):
-                    val = float(base_val) * (1.0 + length_pct * step)
-                else:
-                    val = float(base_val)
+                if is_width_key(key): val = base_val * (1.0 + px_width_pct * step)
+                elif is_length_key(key): val = base_val * (1.0 + px_length_pct * step)
+                else: val = base_val
             else:
-                if is_width_key(key):
-                    val = float(base_val) + width_inc * step
-                elif is_length_key(key):
-                    val = float(base_val) + length_inc * step
-                else:
-                    val = float(base_val)
-            # Prevent negatives
-            scale[size][key] = max(0.0, float(val))
-    return scale
+                if is_width_key(key): val = base_val + cm_width_inc * step
+                elif is_length_key(key): val = base_val + cm_length_inc * step
+                else: val = base_val
+            # Round to 2 decimals for CM, whole numbers for PX
+            if is_px:
+                scale_cm[size][key] = float(round(max(0.0, float(val)), 0))
+            else:
+                scale_cm[size][key] = float(round(max(0.0, float(val)), 2))
+            
+        # Inch Generation
+        for key, base_val in base_in.items():
+            if is_px:
+                if is_width_key(key): val = base_val * (1.0 + px_width_pct * step)
+                elif is_length_key(key): val = base_val * (1.0 + px_length_pct * step)
+                else: val = base_val
+            else:
+                if is_width_key(key): val = base_val + in_width_inc * step
+                elif is_length_key(key): val = base_val + in_length_inc * step
+                else: val = base_val
+            # Round to 2 decimals for Inches, whole numbers for PX
+            if is_px:
+                scale_in[size][key] = float(round(max(0.0, float(val)), 0))
+            else:
+                scale_in[size][key] = float(round(max(0.0, float(val)), 2))
+
+
+    return scale_cm, scale_in
 
 
 def process_image_request(input_image_path: str, work_dir: str, category_id: int, true_size: str, true_waist: Optional[float], unit: str) -> Dict[str, Any]:
@@ -313,17 +381,21 @@ def process_image_request(input_image_path: str, work_dir: str, category_id: int
             if isinstance(rep, list) and len(rep) > 0:
                 measurements_single = rep[0].get('measurements', {})
         if measurements_single:
-            scale_table = _build_size_scale(measurements_single, true_size=true_size, unit=unit)
+            scale_cm, scale_in = _build_size_scale(measurements_single, true_size=true_size, input_unit=unit)
             with open(size_scale_path, 'w') as f:
                 json.dump({
-                    "unit": unit,
+                    "units": ["cm", "inch"],
                     "true_size": true_size,
-                    "scale": scale_table,
+                    "scale_cm": scale_cm,
+                    "scale_in": scale_in,
+                    # Legacy support: default to input unit
+                    "unit": unit,
+                    "scale": scale_in if unit.lower() in ("inch", "inches", "in") else scale_cm
                 }, f, indent=2)
         else:
             # still write an empty scale file for consistency
             with open(size_scale_path, 'w') as f:
-                json.dump({"unit": unit, "true_size": true_size, "scale": {}}, f, indent=2)
+                json.dump({"units": ["cm", "inch"], "true_size": true_size, "scale_cm": {}, "scale_in": {}, "unit": unit, "scale": {}}, f, indent=2)
     except Exception as e:
         measurement_error = (str(e) if measurement_error is None else measurement_error)
 
