@@ -1,0 +1,74 @@
+# flyctl launch added from .gitignore
+# Python artifacts
+**/__pycache__
+**/*.py[cod]
+**/*.pyo
+**/*.pyd
+
+# Compiled extensions
+**/*.so
+**/*.dylib
+**/*.dll
+**/*.lib
+**/*.exp
+**/*.pdb
+**/*.o
+**/*.obj
+
+# Builds and packaging
+**/build
+**/dist
+**/.eggs
+**/*.egg-info
+
+# Virtual environments
+**/venv
+**/.venv
+**/.env
+
+# IDE/editor settings
+**/.vscode
+**/.idea
+
+# OS files
+**/.DS_Store
+**/Thumbs.db
+
+# Data, outputs, logs, models
+**/data
+**/output
+**/log
+# **/models
+
+# Large/binary model files
+# **/*.pth
+**/*.pt
+**/*.pkl
+
+# NMS compiled artifacts
+**/lib/nms/build
+**/lib/nms/*.so
+**/lib/nms/*.pyd
+**/lib/nms/*.dll
+**/lib/nms/*.exp
+**/lib/nms/*.lib
+**/lib/nms/**/__pycache__
+
+# DeepFashion2 external repo and builds
+**/DeepFashion2
+**/DeepFashion2/**/build
+**/DeepFashion2/**/__pycache__
+**/DeepFashion2/**/pycocotools/*.so
+**/DeepFashion2/**/pycocotools/*.c
+**/DeepFashion2/**/pycocotools/*.pyc
+
+
+# Run artifacts (exclude per-run outputs from version control)
+**/api_runs
+
+
+
+# flyctl launch added from .venv/.gitignore
+# Created by venv; see https://docs.python.org/3/library/venv.html
+.venv/**/*
+fly.toml
